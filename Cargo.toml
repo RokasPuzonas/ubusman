@@ -1,0 +1,15 @@
+[package]
+name = "ubusman"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.70"
+directories-next = "2.0.0"
+eframe = "0.21.3"
+egui = "0.21.0"
+serde = { version = "1.0.158", features = ["derive"] }
+thiserror = "1.0.40"
+toml = "0.7.3"
