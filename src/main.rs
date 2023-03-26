@@ -5,11 +5,13 @@ use anyhow::Result;
 use smol::{channel, block_on};
 use async_ssh2_lite::{AsyncSession};
 use app::App;
+use ubus::MonitorEvent;
 
-use crate::ubus::{Ubus, UbusEvent};
+use crate::ubus::{Ubus, ListenEvent, MonitorDir, MonitorEventType};
 
 mod app;
 mod ubus;
+mod async_line_reader;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,12 +28,12 @@ async fn main() -> Result<()> {
     session.userauth_password(username, password).await?;
 
     let ubus = Ubus::new(session);
-    let (tx, rx) = channel::unbounded::<UbusEvent>();
+    let (tx, rx) = channel::unbounded::<MonitorEvent>();
     let listener = {
         let tx = tx.clone();
         tokio::spawn(async move {
             println!("before listen");
-            if let Err(err) = ubus.listen(&[], tx).await {
+            if let Err(err) = ubus.monitor(None, &[], tx).await {
                 dbg!(err);
             };
             println!("after listen");
