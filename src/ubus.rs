@@ -2,11 +2,11 @@ use std::{io::Read, borrow::Cow, net::TcpStream};
 
 use async_ssh2_lite::AsyncSession;
 use lazy_regex::regex_captures;
-use serde_json::Value;
+use serde_json::{Value, json};
 use shell_escape::unix::escape;
 use hex::FromHex;
 use anyhow::{Result, bail, anyhow};
-use smol::{Async, io::AsyncReadExt};
+use smol::{Async, io::AsyncReadExt, channel::Sender};
 use thiserror::Error;
 
 pub struct Ubus {
@@ -59,6 +59,12 @@ pub struct UbusObject {
     pub name: String,
     pub id: u32,
     pub methods: Vec<(String, Vec<(String, UbusParamType)>)>
+}
+
+#[derive(Debug)]
+pub struct UbusEvent {
+    pub path: String,
+    pub value: Value
 }
 
 fn parse_parameter_type(param: &str) -> Option<UbusParamType> {
@@ -216,5 +222,55 @@ impl Ubus {
         channel.close().await?;
 
         Ok(())
+    }
+
+    fn parse_event(bytes: &[u8]) -> Result<UbusEvent> {
+        let event_value: Value = serde_json::from_slice(bytes)?;
+        let event_map = event_value.as_object()
+            .ok_or(anyhow!("Expected event to be an object"))?;
+
+        if event_map.keys().len() != 1 {
+            bail!("Expected event object to only contain one key");
+        }
+
+        let path = event_map.keys().next().unwrap().clone();
+        let value = event_map.get(&path).unwrap().clone();
+
+        Ok(UbusEvent { path, value })
+    }
+
+    pub async fn listen(self, paths: &[&str], sender: Sender<UbusEvent>) -> Result<()> {
+        let cmd = format!("ubus listen {}", paths.join(" "));
+        let mut channel = self.session.channel_session().await?;
+        channel.exec(&cmd).await?;
+
+        let mut line_buffer = vec![0u8; 1024];
+        let mut buffer_size = 0usize;
+        loop {
+            let n = channel.read(&mut line_buffer[buffer_size..]).await?;
+
+            let delim_pos = line_buffer[buffer_size..(buffer_size+n)]
+                .iter()
+                .position(|c| *c == b'\n')
+                .map(|pos| pos + buffer_size);
+
+            buffer_size += n;
+            if let Some(pos) = delim_pos {
+                let event = Ubus::parse_event(&line_buffer[0..pos])?;
+                sender.send(event).await?;
+
+                line_buffer.copy_within((pos+1)..buffer_size, 0);
+                buffer_size -= pos;
+                buffer_size -= 1;
+            }
+
+
+            // Double line buffer size if at capacity
+            if buffer_size == line_buffer.len() {
+                for _ in 0..=line_buffer.len() {
+                    line_buffer.push(0u8);
+                }
+            }
+        }
     }
 }

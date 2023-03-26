@@ -1,13 +1,12 @@
-use std::net::ToSocketAddrs;
-
 #[cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
+use std::{net::ToSocketAddrs, thread};
 use anyhow::Result;
-use smol::Async;
-use async_ssh2_lite::{AsyncSession, AsyncSessionStream};
+use smol::{channel, block_on};
+use async_ssh2_lite::{AsyncSession};
 use app::App;
 
-use crate::ubus::Ubus;
+use crate::ubus::{Ubus, UbusEvent};
 
 mod app;
 mod ubus;
@@ -27,14 +26,22 @@ async fn main() -> Result<()> {
     session.userauth_password(username, password).await?;
 
     let ubus = Ubus::new(session);
-    // dbg!(ubus.call(
-    //     "container",
-    //     "get_features",
-    //     None
-    //     ).await?
-    // );
+    let (tx, rx) = channel::unbounded::<UbusEvent>();
+    let listener = {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            println!("before listen");
+            if let Err(err) = ubus.listen(&[], tx).await {
+                dbg!(err);
+            };
+            println!("after listen");
+        })
+    };
 
-    dbg!(ubus.wait_for(&vec!["network"]).await?);
+    loop {
+        let e = rx.recv().await?;
+        dbg!(e);
+    }
 
     /*
     let mut native_options = eframe::NativeOptions::default();
