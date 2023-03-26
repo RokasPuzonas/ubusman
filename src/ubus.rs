@@ -243,6 +243,7 @@ impl Ubus {
         let cmd = format!("ubus listen {}", paths.join(" "));
         let mut channel = self.session.channel_session().await?;
         channel.exec(&cmd).await?;
+        // TODO: Handle error? 'channel.exit_status()', idk if neededdi
 
         let mut line_buffer = vec![0u8; 1024];
         let mut buffer_size = 0usize;
@@ -272,5 +273,17 @@ impl Ubus {
                 }
             }
         }
+    }
+
+    pub async fn subscribe(self, paths: &[&str]) -> Result<()> {
+        if paths.len() < 1 {
+            bail!("At least 1 object is required")
+        }
+        let cmd = format!("ubus subscribe {}", paths.join(" "));
+        let mut channel = self.session.channel_session().await?;
+        channel.exec(&cmd).await?;
+
+        // TODO: Haven't figured out how to test subscribe event using default objects on ubus.
+        todo!();
     }
 }
