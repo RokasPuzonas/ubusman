@@ -1,20 +1,27 @@
 #[cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-use std::{net::ToSocketAddrs, thread};
+use std::{net::ToSocketAddrs};
 use anyhow::Result;
-use smol::{channel, block_on};
+use smol::channel;
 use async_ssh2_lite::{AsyncSession};
 use app::App;
+use tokio::runtime::Runtime;
 use ubus::MonitorEvent;
 
-use crate::ubus::{Ubus, ListenEvent, MonitorDir, MonitorEventType};
+use crate::ubus::Ubus;
 
 mod app;
 mod ubus;
 mod async_line_reader;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// TODO: Save config to file
+
+fn main() {
+    let rt = Runtime::new().expect("Unable to create Runtime");
+
+    let _enter = rt.enter();
+
+    /*
     let address = "172.24.224.1:22";
     let username = "root";
     let password = "admin01";
@@ -44,8 +51,8 @@ async fn main() -> Result<()> {
         let e = rx.recv().await?;
         dbg!(e);
     }
+    */
 
-    /*
     let mut native_options = eframe::NativeOptions::default();
     native_options.decorated = true;
     native_options.resizable = true;
@@ -58,9 +65,6 @@ async fn main() -> Result<()> {
             app.init(cc);
             Box::new(app)
         })
-    )
-    */
-
-    Ok(())
+    ).expect("Unable to create window");
 }
 

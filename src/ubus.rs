@@ -1,8 +1,8 @@
-use std::{io::Read, borrow::Cow, net::TcpStream, str::FromStr, any};
+use std::{borrow::Cow, net::TcpStream, str::FromStr};
 
 use async_ssh2_lite::AsyncSession;
 use lazy_regex::regex_captures;
-use serde_json::{Value, json};
+use serde_json::Value;
 use shell_escape::unix::escape;
 use hex::FromHex;
 use anyhow::{Result, bail, anyhow};
@@ -10,6 +10,8 @@ use smol::{Async, io::AsyncReadExt, channel::Sender};
 use thiserror::Error;
 
 use crate::async_line_reader::AsyncLineReader;
+
+// TODO: Add tests
 
 pub struct Ubus {
     session: AsyncSession<Async<TcpStream>>
