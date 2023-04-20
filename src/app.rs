@@ -7,7 +7,8 @@ use std::{
 use anyhow::Result;
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
 use eframe::CreationContext;
-use egui::TextEdit;
+use egui::text::LayoutJob;
+use lazy_regex::regex_replace_all;
 use serde_json::Value;
 
 use crate::ubus;
@@ -31,7 +32,7 @@ pub struct App {
     object_filter: String,
     objects: Vec<Rc<ubus::Object>>,
     payload: String,
-    response: Option<Value>,
+    response: Option<Result<Value>>,
 
     is_connecting: bool,
     is_disconnecting: bool,
@@ -92,6 +93,14 @@ async fn disconnect(session: AsyncSession<AsyncIoTcpStream>) -> Result<()> {
     Ok(())
 }
 
+fn remove_json_comments(text: &str) -> String {
+    let text = regex_replace_all!(r#"/\*(.|\n)*?\*/"#, &text, |_, _| ""); // Multi line comments
+    let text = regex_replace_all!(r#"//.*\n?"#, &text, |_| ""); // Single line comments
+    let text = regex_replace_all!(r#"(,)(\s*[\]}])"#, &text, |_, _, rest: &str| rest.to_string()); // Trailing commas
+
+    text.into()
+}
+
 impl App {
     pub fn init(&mut self, _cc: &CreationContext) {}
 
@@ -124,9 +133,9 @@ impl App {
                     Err(err) => todo!("{}", err),
                 },
 
-                Call(result) => match result {
-                    Ok(response) => self.response = Some(response),
-                    Err(err) => todo!("{}", err),
+                Call(result) => {
+                    dbg!(&result);
+                    self.response = Some(result)
                 }
             }
         }
@@ -167,14 +176,17 @@ impl App {
     }
 
     fn start_call(&mut self, object: String, method: String, message: Option<Value>) {
+        dbg!(self.session.is_some());
         if self.session.is_none() {
             return;
         }
 
+        dbg!("call");
+
         let tx = self.tx.clone();
         let session = self.session.clone().unwrap();
-        self.session = None;
         tokio::spawn(async move {
+            dbg!("exec");
             let result = ubus::call(&session, &object, &method, message.as_ref()).await;
             tx.send(AsyncEvent::Call(result)).expect("Failed to send event");
         });
@@ -199,12 +211,40 @@ impl App {
 
         ui.text_edit_singleline(&mut self.object_filter);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for obj in &self.objects {
-                CollapsingHeader::new(&obj.name).show(ui, |ui| {
-                    for (name, _) in &obj.methods {
-                        if ui.button(name).clicked() {}
-                    }
-                });
+            for obj in self.objects.iter() {
+                let shown_methods;
+                if obj.name.contains(&self.object_filter) {
+                    shown_methods = obj.methods.iter()
+                        .by_ref()
+                        .collect::<Vec<_>>();
+                } else {
+                    shown_methods = obj.methods.iter()
+                        .filter(|(name, _)| name.contains(&self.object_filter))
+                        .collect::<Vec<_>>();
+                }
+
+                if shown_methods.len() > 0 {
+                    let style = ui.style();
+                    let mut text = LayoutJob::default();
+                    text.append(&obj.name, 0.0, TextFormat {
+                        ..TextFormat::default()
+                    });
+                    text.append(&format!("@{:x}", obj.id), 10.0, TextFormat {
+                        color: style.noninteractive().fg_stroke.color,
+                        italics: true,
+                        ..TextFormat::default()
+                    });
+                    CollapsingHeader::new(text).show(ui, |ui| {
+                        for (name, method_params) in &shown_methods {
+                            if ui.selectable_label(false, name).clicked() {
+                                self.selected_object = Some(obj.clone());
+                                self.selected_method = Some(name.clone());
+                                let method_params = method_params.iter().map(|(s, p)| (s.as_str(), *p)).collect::<Vec<_>>();
+                                self.payload = App::create_default_payload(&method_params);
+                            };
+                        }
+                    });
+                }
             }
         });
     }
@@ -246,10 +286,10 @@ impl App {
                 Array => "[]",
                 Double => "0.00",
             };
-            lines.push(format!("\t\"{}\": {}", &param_name, &param_value));
+            lines.push(format!("\t\"{}\": {}, // {}", &param_name, &param_value, param_type));
         }
 
-        return format!("{{\n{}\n}}", lines.join(",\n"));
+        return format!("{{\n{}\n}}", lines.join("\n"));
     }
 
     fn show_central_panel(&mut self, ui: &mut egui::Ui) {
@@ -320,7 +360,8 @@ impl App {
             if ui.button("call").clicked() {
                 let object_name = self.selected_object.as_ref().unwrap().name.clone();
                 let method_name = self.selected_method.as_ref().unwrap().clone();
-                let message = serde_json::from_str(&self.payload).unwrap(); // TODO: handle parsing error
+                let payload = remove_json_comments(&self.payload);
+                let message = serde_json::from_str(&payload).unwrap(); // TODO: handle parsing error
                 self.start_call(object_name, method_name, Some(message));
                 // TODO: Block sending other requests
             }
@@ -339,8 +380,13 @@ impl App {
                 .resizable(true)
                 .show_inside(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
+                        let mut text = match response {
+                            Ok(response) => serde_json::to_string_pretty(response).unwrap(),
+                            Err(err) => err.to_string()
+                        };
+                        ui.add_space(10.0);
                         ui.add(
-                            egui::TextEdit::multiline(&mut serde_json::to_string_pretty(response).unwrap())
+                            egui::TextEdit::multiline(&mut text)
                                 .font(egui::TextStyle::Monospace) // for cursor height
                                 .code_editor()
                                 .desired_rows(10)

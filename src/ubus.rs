@@ -1,4 +1,4 @@
-use std::{borrow::Cow, net::TcpStream, str::FromStr};
+use std::{borrow::Cow, str::FromStr, fmt::Display};
 
 use anyhow::{anyhow, bail, Result};
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
@@ -6,7 +6,7 @@ use hex::FromHex;
 use lazy_regex::regex_captures;
 use serde_json::Value;
 use shell_escape::unix::escape;
-use smol::{channel::Sender, io::AsyncReadExt, Async};
+use smol::{channel::Sender, io::AsyncReadExt};
 use thiserror::Error;
 
 use crate::async_line_reader::AsyncLineReader;
@@ -131,6 +131,22 @@ impl FromStr for MonitorEventType {
             "notify" => Ok(Notify),
             _ => Err(anyhow!("Unknown event type '{}'", s)),
         }
+    }
+}
+
+impl Display for UbusParamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use UbusParamType::*;
+        let text = match self {
+            String => "String",
+            Boolean => "Boolean",
+            Integer => "Integer",
+            Double => "Double",
+            Table => "Table",
+            Array => "Array",
+            Unknown => "(unknown)"
+        };
+        f.write_str(text)
     }
 }
 
