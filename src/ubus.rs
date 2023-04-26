@@ -218,14 +218,17 @@ fn escape_json(json: &Value) -> String {
 async fn exec_cmd(session: &Session, cmd: &str) -> Result<String> {
     let mut channel = session.channel_session().await?;
     channel.exec(cmd).await?;
+    channel.send_eof().await?;
+    channel.wait_eof().await?;
     channel.close().await?;
+    channel.wait_close().await?;
     if let Some(err) = parse_error_code(channel.exit_status()?) {
         return Err(err.into());
     }
 
-    let mut output = String::new();
-    channel.read_to_string(&mut output).await?;
-    Ok(output)
+    let mut string_buffer = String::new();
+    channel.read_to_string(&mut string_buffer).await?;
+    Ok(string_buffer)
 }
 
 pub async fn list(session: &Session, path: Option<&str>) -> Result<Vec<String>> {
@@ -300,6 +303,10 @@ pub async fn call(
 
     // TODO: handle cases where output is empty? ("")
     let output = exec_cmd(session, &cmd).await?;
+    if output.is_empty() {
+        return Ok(Value::Null);
+    }
+
     let value = serde_json::from_str::<Value>(&output)?;
     Ok(value)
 }
