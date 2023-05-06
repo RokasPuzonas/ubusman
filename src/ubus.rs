@@ -211,7 +211,7 @@ fn parse_hex_id(id: &str) -> Result<u32> {
     return Ok(byte1 + byte2 + byte3 + byte4);
 }
 
-fn escape_json(json: &Value) -> String {
+pub fn escape_json(json: &Value) -> String {
     escape(Cow::from(json.to_string())).into()
 }
 

@@ -7,14 +7,36 @@ use std::{
 use anyhow::Result;
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
 use eframe::CreationContext;
-use egui::{text::LayoutJob, Color32};
+use egui::{text::LayoutJob, Color32, ColorImage, TextureHandle, Vec2, Image};
 use lazy_regex::regex_replace_all;
 use serde_json::Value;
+use lazy_static::lazy_static;
+use arboard::Clipboard;
 
-use crate::ubus;
+use crate::ubus::{self, escape_json};
 
 const ERROR_COLOR: Color32 = Color32::from_rgb(180, 20, 20);
 const SUCCESS_COLOR: Color32 = Color32::from_rgb(20, 150, 20);
+lazy_static! {
+    pub static ref COPY_ICON: ColorImage = load_image_from_memory(include_bytes!("./copy.png"))
+        .expect("Failed to load copy icon") as ColorImage;
+}
+
+pub fn load_image_from_memory(image_data: &[u8]) -> Result<ColorImage, image::ImageError> {
+    let image = image::load_from_memory(image_data)?;
+    let size = [image.width() as _, image.height() as _];
+    let image_buffer = image.to_rgba8();
+    let pixels = image_buffer.as_flat_samples();
+    Ok(ColorImage::from_rgba_unmultiplied(
+        size,
+        pixels.as_slice(),
+    ))
+}
+
+fn set_clipboard(text: &str) {
+    let mut clipboard = Clipboard::new().unwrap();
+    clipboard.set_text(text).unwrap();
+}
 
 pub enum AsyncEvent {
     Connect(Result<AsyncSession<AsyncIoTcpStream>>),
@@ -49,6 +71,8 @@ pub struct App {
 
     tx: Sender<AsyncEvent>,
     rx: Receiver<AsyncEvent>,
+
+    copy_texture: Option<TextureHandle>
 }
 
 impl Default for App {
@@ -78,6 +102,8 @@ impl Default for App {
 
             tx,
             rx,
+
+            copy_texture: None
         }
     }
 }
@@ -123,7 +149,7 @@ fn json_layouter(ui: &egui::Ui, string: &str, wrap_width: f32) -> Arc<egui::Gall
 }
 
 impl App {
-    pub fn init(&mut self, _cc: &CreationContext) {
+    pub fn init(&mut self, cc: &CreationContext) {
         if self.settings.connect_immidiately {
             let username = &self.settings.username;
             let password = &self.settings.password;
@@ -141,6 +167,27 @@ impl App {
             let socket_addr = SocketAddrV4::new(address, port);
             self.start_connect(socket_addr, username.clone(), password.clone());
         }
+
+
+
+        self.copy_texture = Some(cc.egui_ctx.load_texture(
+            "clipboard",
+            COPY_ICON.clone(),
+            Default::default()
+        ));
+    }
+
+    pub fn get_selected_object(&self) -> Option<&str> {
+        self.selected_object.as_ref().map(|obj| obj.name.as_str())
+    }
+
+    pub fn get_selected_method(&self) -> Option<&str> {
+        self.selected_method.as_ref().map(|method| method.as_str())
+    }
+
+    pub fn get_payload(&self) -> serde_json::Result<Value> {
+        let stripped_payload = remove_json_comments(&self.payload);
+        serde_json::from_str(&stripped_payload)
     }
 
     fn handle_events(&mut self, _ctx: &egui::Context) {
@@ -358,6 +405,7 @@ impl App {
     }
 
     fn show_central_panel(&mut self, ui: &mut egui::Ui) {
+        use egui::*;
         ui.horizontal(|ui| {
             // Object dropdown
             {
@@ -424,12 +472,21 @@ impl App {
             let call_enabled = self.selected_object.is_some() && self.selected_method.is_some();
             ui.add_enabled_ui(call_enabled, |ui| {
                 if ui.button("call").clicked() {
-                    let object_name = self.selected_object.as_ref().unwrap().name.clone();
-                    let method_name = self.selected_method.as_ref().unwrap().clone();
-                    let payload = remove_json_comments(&self.payload);
-                    let message = serde_json::from_str(&payload).unwrap(); // TODO: handle parsing error
-                    self.start_call(object_name, method_name, Some(message));
+                    let object_name = self.get_selected_object().unwrap().into();
+                    let method_name = self.get_selected_method().unwrap().into();
+                    let payload = self.get_payload().unwrap(); // TODO: handle parsing error
+                    self.start_call(object_name, method_name, Some(payload));
                     // TODO: Block sending other requests
+                }
+
+                let copy_icon = self.copy_texture.as_ref().expect("Copy icon not loaded");
+                let copy_button = Button::image_and_text(copy_icon.id(), Vec2::new(10.0, 10.0), "copy");
+                if ui.add(copy_button).clicked() {
+                    let object_name = self.get_selected_object().unwrap();
+                    let method_name = self.get_selected_method().unwrap();
+                    let payload = self.get_payload().unwrap(); // TODO: handle parsing error
+                    let cmd = format!("ubus call {} {} {}", object_name, method_name, escape_json(&payload));
+                    set_clipboard(&cmd);
                 }
             });
         });
