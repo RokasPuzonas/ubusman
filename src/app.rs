@@ -1,17 +1,20 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
-    sync::mpsc::{Receiver, Sender},
+    sync::{mpsc::{Receiver, Sender}, Arc},
     vec, rc::Rc,
 };
 
 use anyhow::Result;
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
 use eframe::CreationContext;
-use egui::text::LayoutJob;
+use egui::{text::LayoutJob, Color32};
 use lazy_regex::regex_replace_all;
 use serde_json::Value;
 
 use crate::ubus;
+
+const ERROR_COLOR: Color32 = Color32::from_rgb(180, 20, 20);
+const SUCCESS_COLOR: Color32 = Color32::from_rgb(20, 150, 20);
 
 pub enum AsyncEvent {
     Connect(Result<AsyncSession<AsyncIoTcpStream>>),
@@ -20,11 +23,18 @@ pub enum AsyncEvent {
     Call(Result<Value>)
 }
 
-pub struct App {
+pub struct AppSettings {
     address: String,
     port: u16,
     username: String,
     password: String,
+
+    show_object_ids: bool,
+    connect_immidiately: bool
+}
+
+pub struct App {
+    settings: AppSettings,
     session: Option<AsyncSession<AsyncIoTcpStream>>,
 
     selected_object: Option<Rc<ubus::Object>>,
@@ -46,10 +56,14 @@ impl Default for App {
         let (tx, rx) = std::sync::mpsc::channel();
 
         Self {
-            address: "172.24.224.1".into(), //"192.168.1.1".to_owned(),
-            port: 22,
-            username: "root".to_owned(),
-            password: "admin01".to_owned(),
+            settings: AppSettings {
+                address: "172.24.224.1".into(), //"192.168.1.1".to_owned(),
+                port: 22,
+                username: "root".to_owned(),
+                password: "admin01".to_owned(),
+                show_object_ids: false,
+                connect_immidiately: true
+            },
             session: None,
 
             object_filter: "".into(),
@@ -101,8 +115,33 @@ fn remove_json_comments(text: &str) -> String {
     text.into()
 }
 
+
+fn json_layouter(ui: &egui::Ui, string: &str, wrap_width: f32) -> Arc<egui::Galley> {
+    let mut layout_job = crate::syntax_highlighting::highlight(ui.ctx(), string, "json");
+    layout_job.wrap.max_width = wrap_width;
+    ui.fonts(|f| f.layout_job(layout_job))
+}
+
 impl App {
-    pub fn init(&mut self, _cc: &CreationContext) {}
+    pub fn init(&mut self, _cc: &CreationContext) {
+        if self.settings.connect_immidiately {
+            let username = &self.settings.username;
+            let password = &self.settings.password;
+            if username.is_empty() || password.is_empty() {
+                return;
+            }
+
+            let address = self.settings.address.parse();
+            if address.is_err() {
+                return;
+            }
+            let address = address.unwrap();
+            let port = self.settings.port;
+
+            let socket_addr = SocketAddrV4::new(address, port);
+            self.start_connect(socket_addr, username.clone(), password.clone());
+        }
+    }
 
     fn handle_events(&mut self, _ctx: &egui::Context) {
         use AsyncEvent::*;
@@ -134,7 +173,6 @@ impl App {
                 },
 
                 Call(result) => {
-                    dbg!(&result);
                     self.response = Some(result)
                 }
             }
@@ -176,17 +214,13 @@ impl App {
     }
 
     fn start_call(&mut self, object: String, method: String, message: Option<Value>) {
-        dbg!(self.session.is_some());
         if self.session.is_none() {
             return;
         }
 
-        dbg!("call");
-
         let tx = self.tx.clone();
         let session = self.session.clone().unwrap();
         tokio::spawn(async move {
-            dbg!("exec");
             let result = ubus::call(&session, &object, &method, message.as_ref()).await;
             tx.send(AsyncEvent::Call(result)).expect("Failed to send event");
         });
@@ -229,11 +263,13 @@ impl App {
                     text.append(&obj.name, 0.0, TextFormat {
                         ..TextFormat::default()
                     });
-                    text.append(&format!("@{:x}", obj.id), 10.0, TextFormat {
-                        color: style.noninteractive().fg_stroke.color,
-                        italics: true,
-                        ..TextFormat::default()
-                    });
+                    if self.settings.show_object_ids {
+                        text.append(&format!("@{:x}", obj.id), 10.0, TextFormat {
+                            color: style.noninteractive().fg_stroke.color,
+                            italics: true,
+                            ..TextFormat::default()
+                        });
+                    }
                     CollapsingHeader::new(text).show(ui, |ui| {
                         for (name, method_params) in &shown_methods {
                             if ui.selectable_label(false, name).clicked() {
@@ -254,16 +290,16 @@ impl App {
 
         egui::ScrollArea::vertical()
             .show(ui, |ui| {
-            ui.text_edit_singleline(&mut self.address);
+            ui.text_edit_singleline(&mut self.settings.address);
             // TODO: ui.text_edit_singleline(&mut self.port);
-            ui.text_edit_singleline(&mut self.username);
-            ui.text_edit_singleline(&mut self.password);
+            ui.text_edit_singleline(&mut self.settings.username);
+            ui.text_edit_singleline(&mut self.settings.password);
             if self.is_connecting {
                 ui.add_enabled(false, Button::new("Connecting..."));
             } else if self.session.is_none() {
                 if ui.button("Connect").clicked() {
-                    let socket_addr = SocketAddrV4::new(self.address.parse().unwrap(), self.port);
-                    self.start_connect(socket_addr, self.username.clone(), self.password.clone());
+                    let socket_addr = SocketAddrV4::new(self.settings.address.parse().unwrap(), self.settings.port);
+                    self.start_connect(socket_addr, self.settings.username.clone(), self.settings.password.clone());
                 }
             } else {
                 if ui.button("Disconnect").clicked() {
@@ -292,109 +328,120 @@ impl App {
         return format!("{{\n{}\n}}", lines.join("\n"));
     }
 
+    fn display_response_textbox(ui: &mut egui::Ui, response: &Result<Value>) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut text = match response {
+                Ok(Value::Null) => "Success!".into(),
+                Ok(response) => serde_json::to_string_pretty(response).unwrap(),
+                Err(err) => format!("Error: {}", err)
+            };
+
+            let textbox = egui::TextEdit::multiline(&mut text)
+                .font(egui::TextStyle::Monospace) // for cursor height
+                .code_editor()
+                .desired_rows(4)
+                .lock_focus(true)
+                .desired_width(f32::INFINITY);
+
+            match response {
+                Ok(Value::Null) => {
+                    ui.add(textbox.text_color(SUCCESS_COLOR));
+                },
+                Err(_) => {
+                    ui.add(textbox.text_color(ERROR_COLOR));
+                },
+                Ok(_) => {
+                    ui.add(textbox.layouter(&mut json_layouter));
+                }
+            };
+        });
+    }
+
     fn show_central_panel(&mut self, ui: &mut egui::Ui) {
-        // Object dropdown
-        {
-            let object_name = self.selected_object.as_ref().map(|obj| obj.name.as_ref()).unwrap_or("");
-            let object_combobox = egui::ComboBox::from_id_source("selected_object")
-                .selected_text(object_name)
-                .width(200.0)
-                .show_ui(ui, |ui| {
+        ui.horizontal(|ui| {
+            // Object dropdown
+            {
+                let object_name = self.selected_object.as_ref().map(|obj| obj.name.as_ref()).unwrap_or("");
+                let object_combobox = egui::ComboBox::from_id_source("selected_object")
+                    .selected_text(object_name)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        let mut selection = None;
+                        for object in &self.objects {
+                            ui.selectable_value(&mut selection, Some(object.clone()), &object.name);
+                        }
+                        return selection;
+                    });
+
+                match object_combobox.inner {
+                    Some(Some(object)) => {
+                        self.selected_method = None;
+                        self.selected_object = Some(object);
+                    },
+                    _ => {}
+                };
+            }
+
+            // Method dropdown
+            {
+                let selected_method_name = self.selected_method.as_deref().unwrap_or("");
+                let method_combobox = ui.add_enabled_ui(self.selected_object.is_some(), |ui| {
                     let mut selection = None;
-                    for object in &self.objects {
-                        ui.selectable_value(&mut selection, Some(object.clone()), &object.name);
-                    }
+                    egui::ComboBox::from_id_source("selected_method")
+                        .selected_text(selected_method_name)
+                        .width(200.0)
+                        .show_ui(ui, |ui| {
+                            if let Some(object) = &self.selected_object {
+                                for method in &object.methods {
+                                    let method_name = &method.0;
+                                    let mut label_response = ui.selectable_label(selected_method_name == method_name, method_name);
+                                    if label_response.clicked() && selected_method_name != method_name {
+                                        selection = Some(method_name.clone());
+                                        label_response.mark_changed();
+                                    }
+                                }
+                            }
+                        });
                     return selection;
                 });
 
-            match object_combobox.inner {
-                Some(Some(object)) => {
-                    self.selected_method = None;
-                    self.selected_object = Some(object);
-                },
-                _ => {}
-            };
-        }
-
-        // Method dropdown
-        {
-            let selected_method_name = self.selected_method.as_deref().unwrap_or("");
-            let method_combobox = ui.add_enabled_ui(self.selected_object.is_some(), |ui| {
-                let mut selection = None;
-                egui::ComboBox::from_id_source("selected_method")
-                    .selected_text(selected_method_name)
-                    .width(200.0)
-                    .show_ui(ui, |ui| {
-                        if let Some(object) = &self.selected_object {
-                            for method in &object.methods {
-                                let method_name = &method.0;
-                                let mut label_response = ui.selectable_label(selected_method_name == method_name, method_name);
-                                if label_response.clicked() && selected_method_name != method_name {
-                                    selection = Some(method_name.clone());
-                                    label_response.mark_changed();
-                                }
-                            }
-                        }
-                    });
-                return selection;
-            });
-
-            match (method_combobox.inner, &self.selected_object) {
-                (Some(method), Some(object)) => {
-                    let method_params = object.methods.iter()
-                        .find(|(name, _)| name.eq(&method))
-                        .map(|(_, params)| params)
-                        .unwrap()
-                        .iter()
-                        .map(|(param_name, param_type)| (param_name.as_str(), *param_type))
-                        .collect::<Vec<_>>();
-                    self.payload = App::create_default_payload(&method_params);
-                    self.selected_method = Some(method);
-                },
-                _ => {}
-            };
-        }
-
-        let call_enabled = self.selected_object.is_some() && self.selected_method.is_some();
-        ui.add_enabled_ui(call_enabled, |ui| {
-            if ui.button("call").clicked() {
-                let object_name = self.selected_object.as_ref().unwrap().name.clone();
-                let method_name = self.selected_method.as_ref().unwrap().clone();
-                let payload = remove_json_comments(&self.payload);
-                let message = serde_json::from_str(&payload).unwrap(); // TODO: handle parsing error
-                self.start_call(object_name, method_name, Some(message));
-                // TODO: Block sending other requests
+                match (method_combobox.inner, &self.selected_object) {
+                    (Some(method), Some(object)) => {
+                        let method_params = object.methods.iter()
+                            .find(|(name, _)| name.eq(&method))
+                            .map(|(_, params)| params)
+                            .unwrap()
+                            .iter()
+                            .map(|(param_name, param_type)| (param_name.as_str(), *param_type))
+                            .collect::<Vec<_>>();
+                        self.payload = App::create_default_payload(&method_params);
+                        self.selected_method = Some(method);
+                    },
+                    _ => {}
+                };
             }
+
+            let call_enabled = self.selected_object.is_some() && self.selected_method.is_some();
+            ui.add_enabled_ui(call_enabled, |ui| {
+                if ui.button("call").clicked() {
+                    let object_name = self.selected_object.as_ref().unwrap().name.clone();
+                    let method_name = self.selected_method.as_ref().unwrap().clone();
+                    let payload = remove_json_comments(&self.payload);
+                    let message = serde_json::from_str(&payload).unwrap(); // TODO: handle parsing error
+                    self.start_call(object_name, method_name, Some(message));
+                    // TODO: Block sending other requests
+                }
+            });
         });
 
         ui.separator();
-
-        let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
-            let mut layout_job = crate::syntax_highlighting::highlight(ui.ctx(), string, "json");
-            layout_job.wrap.max_width = wrap_width;
-            ui.fonts(|f| f.layout_job(layout_job))
-        };
 
         if let Some(response) = &self.response {
             egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(true)
                 .show_inside(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let mut text = match response {
-                            Ok(response) => serde_json::to_string_pretty(response).unwrap(),
-                            Err(err) => err.to_string()
-                        };
-                        ui.add_space(10.0);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text)
-                                .font(egui::TextStyle::Monospace) // for cursor height
-                                .code_editor()
-                                .desired_rows(10)
-                                .lock_focus(true)
-                                .desired_width(f32::INFINITY)
-                                .layouter(&mut layouter),
-                        );
-                    })
+                    ui.add_space(10.0);
+                    App::display_response_textbox(ui, response);
                 });
         }
 
@@ -408,7 +455,7 @@ impl App {
                             .desired_rows(10)
                             .lock_focus(true)
                             .desired_width(f32::INFINITY)
-                            .layouter(&mut layouter),
+                            .layouter(&mut json_layouter),
                     );
                 });
             });
