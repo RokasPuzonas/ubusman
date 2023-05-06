@@ -29,9 +29,10 @@ fn main() {
 
     let mut app = App::default();
     let mut options = eframe::NativeOptions::default();
-    options.min_window_size = Some(Vec2::new(900.0, 500.0));
+    options.min_window_size = Some(Vec2::new(920.0, 500.0));
     let icon_data = load_icon_from_memory(include_bytes!("./icon.png")).expect("Failed to load icon data");
     options.icon_data = Some(icon_data);
+    options.vsync = true;
 
     eframe::run_native(
         "ubusman",
