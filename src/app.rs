@@ -1,14 +1,16 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
     sync::{mpsc::{Receiver, Sender}, Arc},
-    vec, rc::Rc, time::SystemTime,
+    vec, rc::Rc, time::SystemTime, path::{PathBuf, Path}, fs,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
+use directories_next::ProjectDirs;
 use eframe::CreationContext;
 use egui::{text::LayoutJob, Color32, ColorImage, TextureHandle};
 use lazy_regex::regex_replace_all;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use lazy_static::lazy_static;
 use tokio::task::JoinHandle;
@@ -46,6 +48,7 @@ pub enum AsyncEvent {
     Call(Result<Value>)
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct AppSettings {
     address: String,
     port: u16,
@@ -79,13 +82,20 @@ pub struct App {
     copy_texture: Option<TextureHandle>
 }
 
+fn get_config_path() -> PathBuf {
+    let project_dirs = ProjectDirs::from("", "",  "ubusman")
+        .expect("Failed to determine home directory");
+    let config_dir = project_dirs.config_dir();
+    config_dir.join("config.toml")
+}
+
 impl Default for App {
     fn default() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
 
         Self {
             settings: AppSettings {
-                address: "172.24.224.1".into(), //"192.168.1.1".to_owned(),
+                address: "192.168.1.1".to_owned(),
                 port: 22,
                 username: "root".to_owned(),
                 password: "admin01".to_owned(),
@@ -175,13 +185,34 @@ impl App {
             self.start_connect(socket_addr, username.clone(), password.clone());
         }
 
-
-
         self.copy_texture = Some(cc.egui_ctx.load_texture(
             "clipboard",
             COPY_ICON.clone(),
             Default::default()
         ));
+
+        self.load_config();
+    }
+
+    fn load_config(&mut self) -> Result<()> {
+        let config_path = get_config_path();
+        if let Ok(contents) = fs::read_to_string(config_path) {
+            self.settings = toml::from_str(&contents)?;
+        }
+
+        Ok(())
+    }
+
+    fn save_config(&self) -> Result<()> {
+        let config_path = get_config_path();
+        let directory = Path::parent(&config_path)
+            .expect("Failed to get config parent directory");
+        if !Path::is_dir(directory) {
+            fs::create_dir_all(directory)?;
+        }
+
+        fs::write(&config_path, toml::to_string_pretty(&self.settings)?)?;
+        Ok(())
     }
 
     pub fn get_selected_object(&self) -> Option<&str> {
@@ -598,5 +629,9 @@ impl eframe::App for App {
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| self.show_central_panel(ui));
         });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_config();
     }
 }
