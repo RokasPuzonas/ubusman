@@ -24,7 +24,7 @@ lazy_static! {
         .expect("Failed to load copy icon") as ColorImage;
 }
 
-const SOURCE_CODE_URL: &str = "https://example.com";
+const SOURCE_CODE_URL: &str = "https://git.rpuzonas.com/rpuzonas/ubusman";
 const VERSION: &str = version!();
 const GIT_VERSION: &str = git_version!(args = ["--always", "--dirty=*"]);
 
