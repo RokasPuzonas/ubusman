@@ -100,7 +100,7 @@ impl Default for App {
                 username: "root".to_owned(),
                 password: "admin01".to_owned(),
                 show_object_ids: false,
-                connect_on_start: true
+                connect_on_start: false
             },
             session: None,
             ubus_call_handle: None,
@@ -167,6 +167,8 @@ fn json_layouter(ui: &egui::Ui, string: &str, wrap_width: f32) -> Arc<egui::Gall
 
 impl App {
     pub fn init(&mut self, cc: &CreationContext) {
+        self.load_config();
+
         if self.settings.connect_on_start {
             let username = &self.settings.username;
             let password = &self.settings.password;
@@ -190,8 +192,6 @@ impl App {
             COPY_ICON.clone(),
             Default::default()
         ));
-
-        self.load_config();
     }
 
     fn load_config(&mut self) -> Result<()> {

@@ -270,7 +270,7 @@ pub async fn list_verbose(session: &Session, path: Option<&str>) -> Result<Vec<O
             if !params_body.is_empty() {
                 for param in params_body.split(",") {
                     let (_, name, param_type_name) =
-                        regex_captures!(r#"^"([\w-]+)":"(\w+)"$"#, param).ok_or(anyhow!(
+                        regex_captures!(r#"^"([\w-]+)":"([\w\(\)]+)"$"#, param).ok_or(anyhow!(
                             "Failed to parse parameter '{}' in line '{}'",
                             param,
                             line
