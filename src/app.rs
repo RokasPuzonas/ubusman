@@ -1,14 +1,14 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
     sync::{mpsc::{Receiver, Sender}, Arc},
-    vec, rc::Rc, time::{SystemTime, Duration}, path::{PathBuf, Path}, fs,
+    vec, rc::Rc, time::{SystemTime, Duration}, path::{PathBuf, Path}, fs, io::ErrorKind,
 };
 
 use anyhow::Result;
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
 use directories_next::ProjectDirs;
 use eframe::CreationContext;
-use egui::{text::LayoutJob, Color32, ColorImage, TextureHandle};
+use egui::{text::LayoutJob, Color32, ColorImage, TextureHandle, Response};
 use lazy_regex::regex_replace_all;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,6 +65,7 @@ pub struct App {
     ubus_call_handle: Option<JoinHandle<()>>,
     last_ubus_call_at: SystemTime,
     keepalive_handle: Option<JoinHandle<()>>,
+    connect_handle: Option<JoinHandle<()>>,
 
     selected_object: Option<Rc<ubus::Object>>,
     selected_method: Option<String>,
@@ -80,7 +81,10 @@ pub struct App {
     tx: Sender<AsyncEvent>,
     rx: Receiver<AsyncEvent>,
 
-    copy_texture: Option<TextureHandle>
+    copy_texture: Option<TextureHandle>,
+
+    current_error: Option<String>,
+    is_error_shown: bool
 }
 
 fn get_config_path() -> PathBuf {
@@ -105,6 +109,7 @@ impl Default for App {
             },
             session: None,
             ubus_call_handle: None,
+            connect_handle: None,
             keepalive_handle: None,
             last_ubus_call_at: SystemTime::UNIX_EPOCH,
 
@@ -122,7 +127,10 @@ impl Default for App {
             tx,
             rx,
 
-            copy_texture: None
+            copy_texture: None,
+
+            current_error: None,
+            is_error_shown: false
         }
     }
 }
@@ -234,6 +242,32 @@ impl App {
         return false;
     }
 
+    fn show_error(&mut self, text: String) {
+        self.current_error = Some(text);
+        self.is_error_shown = true;
+    }
+
+    fn get_connect_error_message(err: &anyhow::Error) -> Option<String> {
+        if let Some(err) = err.downcast_ref::<async_ssh2_lite::Error>() {
+            use async_ssh2_lite::Error::*;
+
+            match err {
+                Ssh2(err) => {
+                    return Some(format!("{}", err.message()))
+                },
+                Io(err) => {
+                    if err.kind() == ErrorKind::TimedOut {
+                        return Some("Connection timed-out".into())
+                    } else {
+                        return Some(err.to_string())
+                    }
+                },
+                _ => {}
+            }
+        }
+        return None
+    }
+
     fn handle_events(&mut self, ctx: &egui::Context) {
         use AsyncEvent::*;
 
@@ -248,7 +282,17 @@ impl App {
                             self.start_list_objects();
                             self.start_keepalive();
                         }
-                        Err(err) => todo!("{}", err),
+                        Err(err) => {
+                            let error_msg;
+                            if let Some(msg) = App::get_connect_error_message(&err) {
+                                error_msg = msg;
+                            } else {
+                                eprintln!("ERROR: {err}");
+                                error_msg = "Unexpected error occured".into();
+                            }
+
+                            self.show_error(error_msg);
+                        },
                     }
                 }
 
@@ -306,11 +350,20 @@ impl App {
         self.is_connecting = true;
         let tx = self.tx.clone();
         let socket_addr = socket_addr.into();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = connect(socket_addr, username, password).await;
             tx.send(AsyncEvent::Connect(result))
                 .expect("Failed to send event");
         });
+        self.connect_handle = Some(handle);
+    }
+
+    fn stop_connect(&mut self) {
+        if let Some(handle) = &self.connect_handle {
+            handle.abort();
+            self.connect_handle = None;
+            self.is_connecting = false;
+        }
     }
 
     fn start_disconnect(&mut self) {
@@ -434,7 +487,12 @@ impl App {
             ui.text_edit_singleline(&mut self.settings.password);
             ui.add_space(8.0);
             if self.is_connecting {
-                ui.add_enabled(false, Button::new("Connecting..."));
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel?").clicked() {
+                        self.stop_connect();
+                    }
+                    ui.spinner();
+                });
             } else if self.session.is_none() {
                 if ui.button("Connect").clicked() {
                     let socket_addr = SocketAddrV4::new(self.settings.address.parse().unwrap(), self.settings.port);
@@ -632,10 +690,40 @@ impl App {
                 });
             });
     }
+
+    fn show_notification(ui: &mut egui::Ui, text: &str, vertical_offset: f32) -> Response {
+        use egui::*;
+        let margin = 10.0;
+        let opacity = 200u8;
+
+        let style = ui.ctx().style();
+        let bg = style.noninteractive().bg_fill;
+
+        let font = style.text_styles.get(&TextStyle::Body).unwrap();
+        let bg = Color32::from_rgba_premultiplied(bg.r(), bg.g(), bg.b(), opacity);
+        let layout = Layout::bottom_up(Align::Center);
+        let width = 300.0;
+
+        ui.with_layout(layout, |ui| {
+            let galley = ui.fonts(|f| f.layout(text.into(), font.clone(), ERROR_COLOR, width - 2.0*margin));
+
+            let response = ui.allocate_response(galley.rect.expand(margin).size(), Sense::click());
+            let clip_rect = ui.clip_rect().intersect(response.rect);
+            let painter = Painter::new(ui.ctx().clone(), ui.layer_id(), clip_rect);
+
+            let mut rect = response.rect;
+            rect.set_top(rect.top() + (galley.rect.height()+10.0) * vertical_offset);
+            painter.rect(rect, 5.0, bg, Stroke::new(5.0, ERROR_COLOR));
+            painter.galley(rect.left_top() + Vec2::new(margin, margin), galley);
+
+            response
+        }).inner
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        use egui::*;
         self.handle_events(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -651,6 +739,15 @@ impl eframe::App for App {
 
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| self.show_central_panel(ui));
+
+            if let Some(error_text) = &self.current_error {
+                let animation_progress = ctx.animate_bool(Id::new("notification"), self.is_error_shown);
+                if animation_progress > 0.0 {
+                    if App::show_notification(ui, error_text, 1.0 - animation_progress).clicked() {
+                        self.is_error_shown = false;
+                    }
+                }
+            }
         });
     }
 
