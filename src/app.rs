@@ -1,10 +1,10 @@
 use std::{
     net::{SocketAddr, SocketAddrV4},
     sync::{mpsc::{Receiver, Sender}, Arc},
-    vec, rc::Rc, time::SystemTime, path::{PathBuf, Path}, fs,
+    vec, rc::Rc, time::{SystemTime, Duration}, path::{PathBuf, Path}, fs,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_ssh2_lite::{AsyncIoTcpStream, AsyncSession};
 use directories_next::ProjectDirs;
 use eframe::CreationContext;
@@ -64,6 +64,7 @@ pub struct App {
     session: Option<AsyncSession<AsyncIoTcpStream>>,
     ubus_call_handle: Option<JoinHandle<()>>,
     last_ubus_call_at: SystemTime,
+    keepalive_handle: Option<JoinHandle<()>>,
 
     selected_object: Option<Rc<ubus::Object>>,
     selected_method: Option<String>,
@@ -104,6 +105,7 @@ impl Default for App {
             },
             session: None,
             ubus_call_handle: None,
+            keepalive_handle: None,
             last_ubus_call_at: SystemTime::UNIX_EPOCH,
 
             object_filter: "".into(),
@@ -131,7 +133,7 @@ async fn connect<A>(
     password: String,
 ) -> Result<AsyncSession<AsyncIoTcpStream>>
 where
-    A: Into<SocketAddr>,
+    A: Into<SocketAddr>
 {
     let mut session = AsyncSession::<AsyncIoTcpStream>::connect(socket_addr, None).await?;
     session.handshake().await?;
@@ -176,15 +178,12 @@ impl App {
                 return;
             }
 
-            let address = self.settings.address.parse();
-            if address.is_err() {
-                return;
-            }
-            let address = address.unwrap();
-            let port = self.settings.port;
+            if let Ok(addr) = self.settings.address.parse() {
+                let port = self.settings.port;
 
-            let socket_addr = SocketAddrV4::new(address, port);
-            self.start_connect(socket_addr, username.clone(), password.clone());
+                let socket_addr = SocketAddrV4::new(addr, port);
+                self.start_connect(socket_addr, username.clone(), password.clone());
+            }
         }
 
         self.copy_texture = Some(cc.egui_ctx.load_texture(
@@ -235,17 +234,19 @@ impl App {
         return false;
     }
 
-    fn handle_events(&mut self, _ctx: &egui::Context) {
+    fn handle_events(&mut self, ctx: &egui::Context) {
         use AsyncEvent::*;
 
         if let Ok(event) = self.rx.try_recv() {
+            ctx.request_repaint();
             match event {
                 Connect(result) => {
                     self.is_connecting = false;
                     match result {
                         Ok(session) => {
                             self.session = Some(session);
-                            self.start_list_objects()
+                            self.start_list_objects();
+                            self.start_keepalive();
                         }
                         Err(err) => todo!("{}", err),
                     }
@@ -253,6 +254,7 @@ impl App {
 
                 Disconnect(result) => {
                     self.is_disconnecting = false;
+                    self.stop_keepalive();
 
                     if let Err(err) = result {
                         todo!("{}", err)
@@ -269,6 +271,27 @@ impl App {
                     self.ubus_call_handle = None;
                 }
             }
+        }
+    }
+
+    fn start_keepalive(&mut self) {
+        if let Some(session) = &self.session {
+            if !session.authenticated() { return; }
+
+            let session = session.clone();
+            let handle = tokio::spawn(async move {
+                let next_keepalive = session.keepalive_send().await.unwrap();
+                tokio::time::sleep(Duration::from_secs(next_keepalive as u64)).await
+            });
+
+            self.keepalive_handle = Some(handle);
+        }
+    }
+
+    fn stop_keepalive(&mut self) {
+        if let Some(handle) = &self.keepalive_handle {
+            handle.abort();
+            self.keepalive_handle = None;
         }
     }
 
