@@ -251,7 +251,7 @@ pub async fn list_verbose(session: &Session, path: Option<&str>) -> Result<Vec<O
 
     let mut objects = vec![];
     for line in output.lines() {
-        if let Some((_, name, id)) = regex_captures!(r"^'([\w.-]+)' @([0-9a-zA-Z]{8})$", line) {
+        if let Some((_, name, id)) = regex_captures!(r"^'([\w\.-]+)' @([0-9a-zA-Z]{8})$", line) {
             if cur_name.is_some() && cur_id.is_some() {
                 objects.push(Object {
                     id: cur_id.unwrap(),
@@ -263,9 +263,7 @@ pub async fn list_verbose(session: &Session, path: Option<&str>) -> Result<Vec<O
 
             cur_name = Some(name.into());
             cur_id = Some(parse_hex_id(id)?);
-        } else if let Some((_, name, params_body)) =
-            regex_captures!(r#"^\s+"([\w-]+)":\{(.*)}$"#, line)
-        {
+        } else if let Some((_, name, params_body)) = regex_captures!(r#"^\s+"([\w\.-]+)":\{(.*)}$"#, line) {
             let mut params = vec![];
             if !params_body.is_empty() {
                 for param in params_body.split(",") {
